@@ -14,7 +14,7 @@ class ExperimentConfig:
     encoder_type: str = "clip"  # one of: "vit", "clip", "ijepa"
 
     # --- LLM ---
-    llm_model_id: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    llm_model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
 
     # --- LoRA ---
     use_lora: bool = True
@@ -27,7 +27,7 @@ class ExperimentConfig:
 
     # --- Dataset ---
     dataset_name: str = "HuggingFaceM4/the_cauldron"
-    dataset_subset: str = "clevr"
+    dataset_subset: str = "vqav2"
     max_samples: Optional[int] = None  # None = use all
 
     # --- Training ---
@@ -36,7 +36,8 @@ class ExperimentConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     warmup_steps: int = 100
-    num_steps: int = 2000
+    num_steps: Optional[int] = None  # None = auto (train for num_epochs)
+    num_epochs: int = 1              # used when num_steps is None
     max_grad_norm: float = 1.0
 
     # --- Eval / Logging ---

@@ -249,6 +249,16 @@ def run_experiment(
     )
     data_iter = iter(dataloader)
 
+    # ---- Auto-calculate num_steps if not set ----
+    effective_batch = config.batch_size * config.gradient_accumulation_steps
+    if config.num_steps is None:
+        steps_per_epoch = max(1, len(dataset) // effective_batch)
+        config.num_steps = steps_per_epoch * config.num_epochs
+    approx_epochs = config.num_steps * effective_batch / max(len(dataset), 1)
+    print(f"  Dataset:   {len(dataset):,} samples", flush=True)
+    print(f"  Eff batch: {effective_batch}  |  Steps: {config.num_steps}  "
+          f"(~{approx_epochs:.1f} epochs)", flush=True)
+
     # ---- Optimizer & Scheduler ----
     optimizer = AdamW(
         model.get_trainable_parameters(),
