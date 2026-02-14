@@ -27,7 +27,7 @@ class ExperimentConfig:
 
     # --- Dataset ---
     dataset_name: str = "HuggingFaceM4/the_cauldron"
-    dataset_subset: str = "cocoqa"
+    dataset_subset: str = "clevr"
     max_samples: Optional[int] = None  # None = use all
 
     # --- Training ---
