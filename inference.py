@@ -19,17 +19,51 @@ Usage:
 """
 
 import json
+import logging
 import os
 import sys
+import warnings
+from contextlib import contextmanager
 from typing import Optional
 
 import torch
 from PIL import Image
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from models.vision_encoders import VisionEncoderWrapper, ENCODER_META
 from models.projector import Projector
+
+
+# --------------------------------------------------------------------------- #
+#  Silence noisy library logs during loading
+# --------------------------------------------------------------------------- #
+
+
+@contextmanager
+def _quiet_load(verbose: bool = False):
+    """Suppress transformers/torch loading noise unless verbose=True."""
+    if verbose:
+        yield
+        return
+
+    # Suppress transformers, huggingface_hub, and torch warnings
+    prev_verbosity = None
+    try:
+        import transformers
+        prev_verbosity = transformers.logging.get_verbosity()
+        transformers.logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore")
+
+    try:
+        yield
+    finally:
+        if prev_verbosity is not None:
+            transformers.logging.set_verbosity(prev_verbosity)
+        logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+        warnings.resetwarnings()
 
 
 # --------------------------------------------------------------------------- #
@@ -88,58 +122,57 @@ class TrainedVLM:
         lora_path: Optional[str] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        verbose: bool = False,
     ):
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+
         self.device = device or _get_device()
         self.dtype = dtype or _resolve_dtype(self.device)
 
-        print(f"Loading on {self.device} with {self.dtype}", flush=True)
+        if verbose:
+            print(f"Loading on {self.device} with {self.dtype}", flush=True)
 
-        # 1. Vision encoder (frozen)
-        print(f"  Loading encoder: {encoder_model_id}", flush=True)
-        self.encoder = VisionEncoderWrapper(
-            model_id=encoder_model_id,
-            encoder_type=encoder_type,
-            dtype=self.dtype,
-        ).to(self.device)
+        with _quiet_load(verbose=verbose):
+            # 1. Vision encoder (frozen)
+            self.encoder = VisionEncoderWrapper(
+                model_id=encoder_model_id,
+                encoder_type=encoder_type,
+                dtype=self.dtype,
+            ).to(self.device)
 
-        # 2. Projector (trained)
-        vision_dim = self.encoder.hidden_dim
-        llm_dim = 896  # will be overridden below
-        # Load LLM config to get hidden_size
-        from transformers import AutoConfig
-        llm_config = AutoConfig.from_pretrained(llm_model_id)
-        llm_dim = llm_config.hidden_size
+            # 2. Projector (trained)
+            vision_dim = self.encoder.hidden_dim
+            llm_config = AutoConfig.from_pretrained(llm_model_id)
+            llm_dim = llm_config.hidden_size
 
-        print(f"  Loading projector: {projector_path}", flush=True)
-        self.projector = Projector(vision_dim=vision_dim, llm_dim=llm_dim).to(self.dtype)
-        state_dict = torch.load(projector_path, map_location="cpu", weights_only=True)
-        self.projector.load_state_dict(state_dict)
-        self.projector = self.projector.to(self.device)
-        self.projector.eval()
+            self.projector = Projector(vision_dim=vision_dim, llm_dim=llm_dim).to(self.dtype)
+            state_dict = torch.load(projector_path, map_location="cpu", weights_only=True)
+            self.projector.load_state_dict(state_dict)
+            self.projector = self.projector.to(self.device)
+            self.projector.eval()
 
-        # 3. LLM + LoRA
-        print(f"  Loading LLM: {llm_model_id}", flush=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            # 3. LLM + LoRA
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_model_id, dtype=self.dtype,
-        ).to(self.device)
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_model_id, dtype=self.dtype,
+            ).to(self.device)
 
-        if lora_path and os.path.isdir(lora_path):
-            print(f"  Loading LoRA: {lora_path}", flush=True)
-            self.llm = PeftModel.from_pretrained(self.llm, lora_path).to(self.device)
+            if lora_path and os.path.isdir(lora_path):
+                self.llm = PeftModel.from_pretrained(self.llm, lora_path).to(self.device)
 
-        self.llm.eval()
+            self.llm.eval()
 
-        # Resolve embed_tokens layer
-        if isinstance(self.llm, PeftModel):
-            self._embed_layer = self.llm.model.model.embed_tokens
-        else:
-            self._embed_layer = self.llm.model.embed_tokens
+            # Resolve embed_tokens layer
+            if isinstance(self.llm, PeftModel):
+                self._embed_layer = self.llm.model.model.embed_tokens
+            else:
+                self._embed_layer = self.llm.model.embed_tokens
 
-        print("  Ready.\n", flush=True)
+        print(f"  Model loaded ({encoder_type}).", flush=True)
 
     @torch.no_grad()
     def generate(
@@ -201,6 +234,7 @@ class TrainedVLM:
 def load_from_local(
     encoder_name: str,
     save_dir: str = "outputs",
+    verbose: bool = False,
 ) -> TrainedVLM:
     """Load a trained VLM from a local output directory.
 
@@ -214,13 +248,13 @@ def load_from_local(
     Args:
         encoder_name: one of "vit", "clip", "ijepa".
         save_dir: root outputs directory.
+        verbose: show detailed loading logs.
 
     Returns:
         A ready-to-use TrainedVLM instance.
     """
     folder = os.path.join(save_dir, encoder_name)
 
-    # Load training config
     cfg_path = os.path.join(folder, "config.json")
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -236,6 +270,7 @@ def load_from_local(
         llm_model_id=cfg["llm_model_id"],
         projector_path=projector_path,
         lora_path=lora_path,
+        verbose=verbose,
     )
 
 
@@ -247,6 +282,7 @@ def load_from_local(
 def load_from_hub(
     repo_id: str,
     encoder_name: str,
+    verbose: bool = False,
 ) -> TrainedVLM:
     """Download and load a trained VLM from HuggingFace Hub.
 
@@ -309,6 +345,7 @@ def load_from_hub(
         llm_model_id=cfg["llm_model_id"],
         projector_path=projector_path,
         lora_path=lora_path,
+        verbose=verbose,
     )
 
 
@@ -388,20 +425,24 @@ Examples:
         "--greedy", action="store_true",
         help="Use greedy decoding instead of sampling.",
     )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Show detailed model loading logs.",
+    )
     args = parser.parse_args()
 
     # Load image
-    print(f"\nLoading image: {args.image}", flush=True)
     image = _load_image(args.image)
-    print(f"  Size: {image.size}\n", flush=True)
 
     # Load model
     if args.from_hub:
-        print(f"Loading from HuggingFace Hub: {args.from_hub}", flush=True)
-        model = load_from_hub(repo_id=args.from_hub, encoder_name=args.encoder)
+        model = load_from_hub(
+            repo_id=args.from_hub, encoder_name=args.encoder, verbose=args.verbose,
+        )
     else:
-        print(f"Loading from local: {args.save_dir}/{args.encoder}/", flush=True)
-        model = load_from_local(encoder_name=args.encoder, save_dir=args.save_dir)
+        model = load_from_local(
+            encoder_name=args.encoder, save_dir=args.save_dir, verbose=args.verbose,
+        )
 
     # Run
     if args.interactive:
@@ -413,5 +454,5 @@ Examples:
             max_new_tokens=args.max_tokens,
             do_sample=not args.greedy,
         )
-        print(f"Question: {args.question}", flush=True)
-        print(f"Answer:   {answer}", flush=True)
+        print(f"\nQuestion: {args.question}")
+        print(f"Answer:   {answer}")
