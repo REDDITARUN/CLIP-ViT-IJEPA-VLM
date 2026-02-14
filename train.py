@@ -149,7 +149,10 @@ def run_experiment(
     accum_loss = 0.0
     t_start = time.time()
 
-    pbar = tqdm(total=config.num_steps, desc=config.encoder_name.upper())
+    total_micro_steps = config.num_steps * config.gradient_accumulation_steps
+    print(f"\n  Starting training: {config.num_steps} optimizer steps "
+          f"({total_micro_steps} micro-steps, "
+          f"accum={config.gradient_accumulation_steps})\n", flush=True)
 
     while global_step < config.num_steps:
         # Fetch next batch (restart dataloader if exhausted)
@@ -169,6 +172,13 @@ def run_experiment(
         accum_loss += loss.item()
         micro_step += 1
 
+        # Log every micro-step so the user can see activity
+        micro_loss = loss.item() * config.gradient_accumulation_steps
+        print(f"  micro {micro_step:>6d} / {total_micro_steps}  |  "
+              f"accum {((micro_step - 1) % config.gradient_accumulation_steps) + 1}"
+              f"/{config.gradient_accumulation_steps}  |  "
+              f"micro_loss={micro_loss:.4f}", flush=True)
+
         # Optimizer step after accumulating enough micro-batches
         if micro_step % config.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(
@@ -180,24 +190,25 @@ def run_experiment(
             optimizer.zero_grad()
 
             global_step += 1
-            # Re-scale to get the true average loss for this step
             step_loss = accum_loss
             accum_loss = 0.0
 
             tracker.update(global_step, step_loss)
 
-            if global_step % config.log_every == 0:
-                elapsed = time.time() - t_start
-                lr_now = scheduler.get_last_lr()[0]
-                pbar.set_postfix(
-                    loss=f"{step_loss:.4f}",
-                    lr=f"{lr_now:.2e}",
-                    elapsed=f"{elapsed:.0f}s",
-                )
+            elapsed = time.time() - t_start
+            lr_now = scheduler.get_last_lr()[0]
+            steps_per_sec = global_step / elapsed if elapsed > 0 else 0
+            eta = (config.num_steps - global_step) / steps_per_sec if steps_per_sec > 0 else 0
 
-            pbar.update(1)
+            print(f"  >>> STEP {global_step:>5d} / {config.num_steps}  |  "
+                  f"loss={step_loss:.4f}  |  "
+                  f"lr={lr_now:.2e}  |  "
+                  f"elapsed={elapsed:.0f}s  |  "
+                  f"speed={steps_per_sec:.2f} steps/s  |  "
+                  f"ETA={eta:.0f}s", flush=True)
+            print("-" * 80, flush=True)
 
-    pbar.close()
+    print("", flush=True)
 
     elapsed_total = time.time() - t_start
     summary = tracker.summary()
