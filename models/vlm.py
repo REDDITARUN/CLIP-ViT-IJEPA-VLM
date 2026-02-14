@@ -72,8 +72,8 @@ class StitchedVLM(nn.Module):
             )
             self.llm = get_peft_model(self.llm, lora_config)
 
-        # ---- Projector (trainable) ----
-        self.projector = Projector(vision_dim=vision_dim, llm_dim=llm_dim)
+        # ---- Projector (trainable, same dtype as encoder/LLM) ----
+        self.projector = Projector(vision_dim=vision_dim, llm_dim=llm_dim).to(dtype)
 
     # ------------------------------------------------------------------
     # Helpers
