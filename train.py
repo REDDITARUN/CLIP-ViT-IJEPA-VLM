@@ -149,37 +149,28 @@ def run_experiment(
     accum_loss = 0.0
     t_start = time.time()
 
-    total_micro_steps = config.num_steps * config.gradient_accumulation_steps
-    print(f"\n  Starting training: {config.num_steps} optimizer steps "
-          f"({total_micro_steps} micro-steps, "
-          f"accum={config.gradient_accumulation_steps})\n", flush=True)
+    pbar = tqdm(
+        total=config.num_steps,
+        desc=config.encoder_name.upper(),
+        bar_format="{l_bar}{bar:30}{r_bar}",
+        dynamic_ncols=True,
+    )
 
     while global_step < config.num_steps:
-        # Fetch next batch (restart dataloader if exhausted)
         try:
             batch = next(data_iter)
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
 
-        # Move batch to device
         batch = {k: v.to(device) for k, v in batch.items()}
 
-        # Forward
         outputs = model(**batch)
         loss = outputs["loss"] / config.gradient_accumulation_steps
         loss.backward()
         accum_loss += loss.item()
         micro_step += 1
 
-        # Log every micro-step so the user can see activity
-        micro_loss = loss.item() * config.gradient_accumulation_steps
-        print(f"  micro {micro_step:>6d} / {total_micro_steps}  |  "
-              f"accum {((micro_step - 1) % config.gradient_accumulation_steps) + 1}"
-              f"/{config.gradient_accumulation_steps}  |  "
-              f"micro_loss={micro_loss:.4f}", flush=True)
-
-        # Optimizer step after accumulating enough micro-batches
         if micro_step % config.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(
                 list(model.get_trainable_parameters()),
@@ -197,18 +188,15 @@ def run_experiment(
 
             elapsed = time.time() - t_start
             lr_now = scheduler.get_last_lr()[0]
-            steps_per_sec = global_step / elapsed if elapsed > 0 else 0
-            eta = (config.num_steps - global_step) / steps_per_sec if steps_per_sec > 0 else 0
 
-            print(f"  >>> STEP {global_step:>5d} / {config.num_steps}  |  "
-                  f"loss={step_loss:.4f}  |  "
-                  f"lr={lr_now:.2e}  |  "
-                  f"elapsed={elapsed:.0f}s  |  "
-                  f"speed={steps_per_sec:.2f} steps/s  |  "
-                  f"ETA={eta:.0f}s", flush=True)
-            print("-" * 80, flush=True)
+            pbar.set_postfix(
+                loss=f"{step_loss:.4f}",
+                lr=f"{lr_now:.2e}",
+                t=f"{elapsed:.0f}s",
+            )
+            pbar.update(1)
 
-    print("", flush=True)
+    pbar.close()
 
     elapsed_total = time.time() - t_start
     summary = tracker.summary()
