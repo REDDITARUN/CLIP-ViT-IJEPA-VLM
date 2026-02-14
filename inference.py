@@ -200,7 +200,7 @@ class TrainedVLM:
         vision_tokens = self.encoder(pixel_values)
         visual_embeds = self.projector(vision_tokens.to(self.dtype))
 
-        # Tokenize question
+        # Tokenize question -- must match training format exactly
         prompt = f"<image>\n{question}"
         tok = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         text_embeds = self._embed_layer(tok["input_ids"])
@@ -210,10 +210,15 @@ class TrainedVLM:
         attn_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=self.device)
 
         # Generate
+        # Qwen2.5 models have *two* EOS ids (<|endoftext|> + <|im_end|>).
+        # The instruct-tuned 1.5B sometimes fires <|im_end|> immediately
+        # when the prompt doesn't look like a chat template.  Force at
+        # least a few tokens so the trained LoRA has a chance to speak.
         gen_kwargs = dict(
             inputs_embeds=inputs_embeds,
             attention_mask=attn_mask,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=3,
             do_sample=do_sample,
             pad_token_id=self.tokenizer.pad_token_id,
         )
@@ -222,7 +227,15 @@ class TrainedVLM:
             gen_kwargs["top_p"] = 0.9
 
         output_ids = self.llm.generate(**gen_kwargs)
-        text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+
+        if not text:
+            # Fallback: decode WITHOUT stripping special tokens so we can
+            # see what the model actually produced (helps debug).
+            raw = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
+            print(f"  [DEBUG] Empty output. Raw tokens ({output_ids.shape[-1]}): {raw!r}",
+                  flush=True)
+
         return text
 
 

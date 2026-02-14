@@ -5,7 +5,7 @@ Computes exact-match accuracy on VQA datasets not seen during training.
 Usage:
     python eval.py                                    # eval all 3 encoders on all benchmarks
     python eval.py --encoder clip                     # eval one encoder
-    python eval.py --encoder clip --benchmark okvqa   # specific benchmark
+    python eval.py --encoder clip --benchmark clevr    # specific benchmark
     python eval.py --max_samples 500                  # quick eval on subset
 """
 
@@ -26,26 +26,25 @@ from data import CauldronDataset
 #  Benchmarks: datasets NOT used in training
 # --------------------------------------------------------------------------- #
 
+# NOTE: Only subsets whose images are *embedded* in the parquet files work
+# reliably.  Subsets like okvqa / aokvqa / visual7w store image paths that
+# point to the M4 team's internal storage and will crash on Colab / local.
 BENCHMARKS = {
-    "okvqa": {
-        "subset": "okvqa",
-        "description": "OK-VQA: requires external knowledge (9k samples)",
+    "clevr": {
+        "subset": "clevr",
+        "description": "CLEVR: compositional reasoning (70k, images embedded)",
     },
-    "aokvqa": {
-        "subset": "aokvqa",
-        "description": "A-OKVQA: augmented knowledge VQA (17k samples)",
+    "scienceqa": {
+        "subset": "scienceqa",
+        "description": "ScienceQA: multimodal science questions (6k, images embedded)",
     },
     "cocoqa": {
         "subset": "cocoqa",
-        "description": "COCO-QA: basic visual QA (46k samples)",
-    },
-    "visual7w": {
-        "subset": "visual7w",
-        "description": "Visual7W: who/what/where/when/why/how/which (70k samples)",
+        "description": "COCO-QA: basic visual QA (46k, images embedded)",
     },
     "tallyqa": {
         "subset": "tallyqa",
-        "description": "TallyQA: counting objects (184k samples)",
+        "description": "TallyQA: counting objects (184k, images embedded)",
     },
 }
 
@@ -129,13 +128,21 @@ def evaluate_model(
 
     correct = 0
     total = 0
+    skipped = 0
     results = []
 
     pbar = tqdm(range(len(dataset)), desc=f"  {benchmark_name}")
 
     for idx in pbar:
-        sample = dataset[idx]
-        image = sample["image"]
+        # Some subsets have broken image paths -- skip gracefully
+        try:
+            sample = dataset[idx]
+            image = sample["image"]
+        except (FileNotFoundError, OSError, Exception) as e:
+            skipped += 1
+            pbar.set_postfix(acc="--", skipped=skipped)
+            continue
+
         question = sample["instruction"].replace("<image>\n", "")
         ground_truth = sample["response"]
 
@@ -162,6 +169,9 @@ def evaluate_model(
         # Update progress
         acc = correct / total * 100
         pbar.set_postfix(acc=f"{acc:.1f}%", correct=correct, total=total)
+
+    if skipped > 0:
+        print(f"  [WARN] Skipped {skipped} samples (broken images).", flush=True)
 
     accuracy = correct / total * 100 if total > 0 else 0
 
